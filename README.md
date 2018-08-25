@@ -1,2 +1,2 @@
 # my-learn-doc
-save all knowledge my learn
+save knowledge my learn
