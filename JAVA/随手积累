@@ -1,0 +1,19 @@
+随手积累
+===
+ServiceLoader
+---
+* ServiceLoader是spi（Service Provider Interface）的一个重要类。他支持在资源目录META-INF/services/XXXInterface中寻找XXXInterface接口对应的所有实现类全路径名，然后使用反射去生成无参的实例。
+* 从```ServiceLoader.load(Class<S> service, ClassLoader loader)```方法开始，它生成ServiceLoader实例并调用reload()方法，创建LazyIterator内部类，这个Iterator在迭代时实验反射实例化META-INF/services/XXXInterface（可能有多个该文件）中的接口实现类（每个文件中可能有多个实现类的全限定名）
+* ServiceLoader的内部数据结构，```LinkedHashMap<String,S> providers```；key是实现类的权限定名，value是实现类的一个实例对象
+
+ClassLoader
+---
+
+URL
+---
+
+AccessControlContext PrivilegedAction AccessController
+---
+
+WeakHashMap
+---

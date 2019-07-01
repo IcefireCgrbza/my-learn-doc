@@ -1,0 +1,535 @@
+DefaultChannelPipeline
+===
+![](pic/ChannelPipeline1.png)
+ChannelPipeline接口的实现
+---
++ ChannelPipeline接口extends ChannelInboundInvoker, ChannelOutboundInvoker, Iterable<Entry<String, ChannelHandler>>
++ ChannelInboundInvoker声明了fireXXX的方法，意为调用ChannelPipeline上下一个入站handler的XXX方法
++ ChannelOutboundInvoker声明了connect等方法，意味调用ChannelPineline上下一个出站handler的方法
++ ChannelPipeline可迭代，每个元素是k-v对，key是handler的名称，value是handler
++ ChannelPipeline本身声明了addLast等对handler增删的方法
+
+示例代码
+---
+```
+		EventLoopGroup worderGroup = new NioEventLoopGroup();
+
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(worderGroup)
+                    .channel(NioSocketChannel.class)
+                    .option(ChannelOption.SO_KEEPALIVE, true)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            ch.pipeline().addLast(new TimeClientHandler());
+                        }
+                    });
+            ChannelFuture f = b.connect("127.0.0.1", 8083).sync();
+            f.channel().closeFuture().sync();
+        } finally {
+            worderGroup.shutdownGracefully();
+        }
+```
+1. DefaultChannelPipeline的初始化
+2. addLast添加ChannelInitializer
+3. invokeHandlerAddedIfNeeded触发handler初始化
+4. addLast添加自定义handler
+5. fireChannelRegister传播入站事件
+6. connect传播出站事件
+
+DefaultChannelPipeline的初始化
+---
+1. 每个Channel初始化时，内部都会初始化一个ChannelPipeline
+2. DefaultChannelPipeline的构造函数
+```
+protected DefaultChannelPipeline(Channel channel) {
+        this.channel = ObjectUtil.checkNotNull(channel, "channel");
+        ...
+
+        tail = new TailContext(this);
+        head = new HeadContext(this);
+
+        head.next = tail;
+        tail.prev = head;
+    }
+```
+3. TailContext的初始化；TailContext既是入站handler，也是AbstractChannelHandlerContext
+```
+final class TailContext extends AbstractChannelHandlerContext implements ChannelInboundHandler {
+
+        TailContext(DefaultChannelPipeline pipeline) {
+            super(pipeline, null, TAIL_NAME, true, false);
+            setAddComplete();
+        }
+        
+        ...
+}
+
+/**
+ * 每个AbstractChannelHandlerContext都有一个handler
+ */
+abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
+        implements ChannelHandlerContext, ResourceLeakHint {
+        
+        AbstractChannelHandlerContext(DefaultChannelPipeline pipeline, EventExecutor executor, String name,
+                                  boolean inbound, boolean outbound) {
+        this.name = ObjectUtil.checkNotNull(name, "name");
+        this.pipeline = pipeline;
+        this.executor = executor;
+        this.inbound = inbound;			//表示这个handler是入站handler
+        this.outbound = outbound;		//表示这个handler是出站handler
+        
+        ...
+    	}
+    	
+    	...
+ }
+```
+4. HeadContext的初始化；HeadContext既是入站handler，也是出站handler，还是AbstractChannelHandlerContext
+```
+final class HeadContext extends AbstractChannelHandlerContext
+            implements ChannelOutboundHandler, ChannelInboundHandler {
+
+        private final Unsafe unsafe;
+
+        HeadContext(DefaultChannelPipeline pipeline) {
+            super(pipeline, null, HEAD_NAME, true, true);
+            unsafe = pipeline.channel().unsafe();
+            setAddComplete();
+        }
+        
+        ...
+}
+```
+5. 总结：DefaultChannelPipeline在初始化时，存了对应的Channel，初始化了一个HeadContext和TailContext组成的双向链表
+
+addLast添加ChannelInitializer
+---
+```
+public class DefaultChannelPipeline implements ChannelPipeline {
+
+	...
+	
+	@Override
+    public final ChannelPipeline addLast(EventExecutorGroup group, String name, ChannelHandler handler) {
+        final AbstractChannelHandlerContext newCtx;
+        synchronized (this) {
+            ...
+
+            //filterName生成handler的名字
+            //new了一个DefaultChannelHandlerContext，它继承AbstractChannelHandlerContext
+            newCtx = newContext(group, filterName(name, handler), handler);
+
+	    //双向链表插入操作
+            addLast0(newCtx);
+
+            if (!registered) {
+                //Channel未注册到eventLoop后回调
+                newCtx.setAddPending();
+                callHandlerCallbackLater(newCtx, true);
+                return this;
+            }
+
+            EventExecutor executor = newCtx.executor();
+            if (!executor.inEventLoop()) {
+                ...
+            }
+        }
+        //Channel注册完成回调
+        callHandlerAdded0(newCtx);
+        return this;
+    }
+    
+    private AbstractChannelHandlerContext newContext(EventExecutorGroup group, String name, ChannelHandler handler) {
+        return new DefaultChannelHandlerContext(this, childExecutor(group), name, handler);
+    }
+    
+    private void addLast0(AbstractChannelHandlerContext newCtx) {
+        AbstractChannelHandlerContext prev = tail.prev;
+        newCtx.prev = prev;
+        newCtx.next = tail;
+        prev.next = newCtx;
+        tail.prev = newCtx;
+    }
+    
+    /**
+     * 一串回调事件
+     */
+    private void callHandlerCallbackLater(AbstractChannelHandlerContext ctx, boolean added) {
+        assert !registered;
+
+        PendingHandlerCallback task = added ? new PendingHandlerAddedTask(ctx) : new PendingHandlerRemovedTask(ctx);
+        PendingHandlerCallback pending = pendingHandlerCallbackHead;
+        if (pending == null) {
+            pendingHandlerCallbackHead = task;
+        } else {
+            // Find the tail of the linked-list.
+            while (pending.next != null) {
+                pending = pending.next;
+            }
+            pending.next = task;
+        }
+    }
+    
+    ...
+}
+    
+final class DefaultChannelHandlerContext extends AbstractChannelHandlerContext {
+
+    private final ChannelHandler handler;
+    
+    DefaultChannelHandlerContext(
+            DefaultChannelPipeline pipeline, EventExecutor executor, String name, ChannelHandler handler) {
+        super(pipeline, executor, name, isInbound(handler), isOutbound(handler));
+        if (handler == null) {
+            throw new NullPointerException("handler");
+        }
+        this.handler = handler;
+    }
+    
+    ...    
+}
+
+private final class PendingHandlerAddedTask extends PendingHandlerCallback {
+
+        PendingHandlerAddedTask(AbstractChannelHandlerContext ctx) {
+            super(ctx);
+        }
+
+        ...
+    }
+    
+    private abstract static class PendingHandlerCallback implements Runnable {
+        final AbstractChannelHandlerContext ctx;
+        PendingHandlerCallback next;
+
+        PendingHandlerCallback(AbstractChannelHandlerContext ctx) {
+            this.ctx = ctx;
+        }
+
+        abstract void execute();
+    }
+```
+
+invokeHandlerAddedIfNeeded触发handler初始化
+---
+1. ChannelInitializer加到ChannelPipeline时注册的回调事件
+```
+private final class PendingHandlerAddedTask extends PendingHandlerCallback {
+
+        PendingHandlerAddedTask(AbstractChannelHandlerContext ctx) {
+            super(ctx);
+        }
+
+        @Override
+        public void run() {
+            callHandlerAdded0(ctx);
+        }
+
+        @Override
+        void execute() {
+            EventExecutor executor = ctx.executor();
+            if (executor.inEventLoop()) {
+                callHandlerAdded0(ctx);
+            } else {
+                try {
+                    executor.execute(this);
+                } catch (RejectedExecutionException e) {
+                    ...
+                }
+            }
+        }
+    }
+    
+public class DefaultChannelPipeline implements ChannelPipeline {
+
+	private void callHandlerAdded0(final AbstractChannelHandlerContext ctx) {
+        try {
+            ctx.callHandlerAdded();
+        } catch (Throwable t) {
+            ...
+        }
+    }
+    
+    	....
+}
+
+abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
+        implements ChannelHandlerContext, ResourceLeakHint {
+        
+        final void callHandlerAdded() throws Exception {
+        if (setAddComplete()) {
+            handler().handlerAdded(this);
+        }
+    }
+        
+        ...
+ }
+ 
+ public abstract class ChannelInitializer<C extends Channel> extends ChannelInboundHandlerAdapter {
+ 
+ 	@Override
+    public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+        ...
+        initChannel(ctx);
+        ...
+    }
+    
+    private boolean initChannel(ChannelHandlerContext ctx) throws Exception {
+        ...
+        try {
+                //触发我们自定义的初始化
+                initChannel((C) ctx.channel());
+            } catch (Throwable cause) {
+                ...
+            } finally {
+                //移除initializer
+                ChannelPipeline pipeline = ctx.pipeline();
+                if (pipeline.context(this) != null) {
+                    pipeline.remove(this);
+                }
+            }
+        return false;
+    }
+ 
+     ...
+ }
+```
+2. 触发回调
+```
+public class DefaultChannelPipeline implements ChannelPipeline {
+
+	final void invokeHandlerAddedIfNeeded() {
+        assert channel.eventLoop().inEventLoop();
+        if (firstRegistration) {
+            firstRegistration = false;
+            // 注册到eventLoop后回调
+            callHandlerAddedForAllHandlers();
+        }
+    }
+    
+    private void callHandlerAddedForAllHandlers() {
+    	...
+    
+        PendingHandlerCallback task = pendingHandlerCallbackHead;
+        while (task != null) {
+            task.execute();
+            task = task.next;
+        }
+    }
+    
+    ...
+}
+```
+
+addLast添加自定义handler
+---
+```
+	//addLast流程同添加ChannelInitializer
+	//注册回调走到callHandlerAdded0
+	//该方法回调自定义handler的handlerAdded
+	
+	private void callHandlerAdded0(final AbstractChannelHandlerContext ctx) {
+        try {
+            ctx.callHandlerAdded();
+        } catch (Throwable t) {
+            ...
+        }
+    }
+    
+    final void callHandlerAdded() throws Exception {
+        if (setAddComplete()) {
+            handler().handlerAdded(this);
+        }
+    }
+```
+
+传播入站事件
+---
+1. DefaultChannelPipeline.java
+```
+public class DefaultChannelPipeline implements ChannelPipeline {
+	
+     public final ChannelPipeline fireChannelRegistered() {
+        AbstractChannelHandlerContext.invokeChannelRegistered(head);
+        return this;
+    }
+    
+    final void invokeHandlerAddedIfNeeded() {
+        assert channel.eventLoop().inEventLoop();
+        if (firstRegistration) {
+            firstRegistration = false;
+            // We are now registered to the EventLoop. It's time to call the callbacks for the ChannelHandlers,
+            // that were added before the registration was done.
+            callHandlerAddedForAllHandlers();
+        }
+    }
+    
+    final class HeadContext extends AbstractChannelHandlerContext
+            implements ChannelOutboundHandler, ChannelInboundHandler {
+            
+        @Override
+        public ChannelHandler handler() {
+            return this;
+        }
+        
+        @Override
+        public void channelRegistered(ChannelHandlerContext ctx) {
+            ...
+            ctx.fireChannelRegistered();
+        }
+        ...
+    }
+	
+    ...
+}
+```
+2. AbstractChannelHandlerContext.java
+```
+abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
+        implements ChannelHandlerContext, ResourceLeakHint {
+        
+    static void invokeChannelRegistered(final AbstractChannelHandlerContext next) {
+    	...
+        next.invokeChannelRegistered();
+        ...
+    }
+    
+    private void invokeChannelRegistered() {
+        if (invokeHandler()) {
+            try {
+                ((ChannelInboundHandler) handler()).channelRegistered(this);
+            } catch (Throwable t) {
+                ...
+            }
+        } else {
+            ...
+        }
+    }
+    
+    public ChannelHandlerContext fireChannelRegistered() {
+        invokeChannelRegistered(findContextInbound());
+        return this;
+    }
+    
+    /**
+     * 根据inbound标记寻找下一个入站handler
+     */
+    private AbstractChannelHandlerContext findContextInbound() {
+        AbstractChannelHandlerContext ctx = this;
+        do {
+            ctx = ctx.next;
+        } while (!ctx.inbound);
+        return ctx;
+    }
+    
+    ...
+}
+```
+3. 总结
+	- ChannelPipeline
+		+ DefaultChannelPipeline: fireChannelRegister
+	- HeadContext
+		+ AbstractChannelHandlerContext: static invokeChannelRegistered
+		+ AbstractChannelHandlerContext: invokeChannelRegistered
+		+ ChannelHandler: channelRegistered
+		+ AbstractChannelHandlerContext: fireChannelRegister
+	- TimeClientHandler
+		+ AbstractChannelHandlerContext: static invokeChannelRegistered
+		+ AbstractChannelHandlerContext: invokeChannelRegistered
+		+ ChannelHandler: channelRegistered
+		+ AbstractChannelHandlerContext: fireChannelRegister
+	- TailContext
+	 	+ AbstractChannelHandlerContext: static invokeChannelRegistered
+		+ AbstractChannelHandlerContext: invokeChannelRegistered
+		+ ChannelHandler: channelRegistered
+		
+![](pic/ChannelPipeline3.png)
+
+传播出站事件
+---
+1. DefaultChannelPipeline.java
+```
+public class DefaultChannelPipeline implements ChannelPipeline {
+	
+     public final ChannelFuture connect(SocketAddress remoteAddress, ChannelPromise promise) {
+        return tail.connect(remoteAddress, promise);
+    }
+    
+    final class HeadContext extends AbstractChannelHandlerContext
+            implements ChannelOutboundHandler, ChannelInboundHandler {
+            
+            @Override
+        public void connect(
+                ChannelHandlerContext ctx,
+                SocketAddress remoteAddress, SocketAddress localAddress,
+                ChannelPromise promise) {
+            unsafe.connect(remoteAddress, localAddress, promise);
+        }
+            
+            ...
+    }
+	
+    ...
+}
+```
+2. AbstractChannelHandlerContext.java
+```
+abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
+        implements ChannelHandlerContext, ResourceLeakHint {
+        
+    public ChannelFuture connect(SocketAddress remoteAddress, ChannelPromise promise) {
+        return connect(remoteAddress, null, promise);
+    }
+    
+    @Override
+    public ChannelFuture connect(
+            final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
+
+       ...
+
+        final AbstractChannelHandlerContext next = findContextOutbound();
+        EventExecutor executor = next.executor();
+        if (executor.inEventLoop()) {
+            next.invokeConnect(remoteAddress, localAddress, promise);
+        } else {
+            ...
+        }
+        return promise;
+    }
+    
+    private AbstractChannelHandlerContext findContextOutbound() {
+        AbstractChannelHandlerContext ctx = this;
+        do {
+            ctx = ctx.prev;
+        } while (!ctx.outbound);
+        return ctx;
+    }
+    
+    private void invokeConnect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
+        if (invokeHandler()) {
+            try {
+                ((ChannelOutboundHandler) handler()).connect(this, remoteAddress, localAddress, promise);
+            } catch (Throwable t) {
+                ...
+            }
+        } else {
+            ...
+        }
+    }
+    
+    ...
+}
+```
+3. 总结
+	- ChannelPipeline 
+		+ DefaultChannelPipeline: connect
+	- TailContext
+		+ AbstractChannelHandlerContext: connect
+	- HeadContext
+		+ AbstractChannelHandlerContext: invokeConnect
+		+ HeadContext: connect
+		+ AbstractNioUnsafe: connect
+		
+![](pic/ChannelPipeline2.png)

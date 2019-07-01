@@ -1,0 +1,41 @@
+jcache
+===
+Caching类
+----
+* 通过内部类CachingProviderRegistry代理所有与CacheProvider相关的工作
+* 提供方法
+```
+public static <K, V> Cache<K, V> getCache(String cacheName, Class<K> keyType,
+                              Class<V> valueType) {
+
+    return getCachingProvider().getCacheManager().getCache(cacheName, keyType,
+        valueType);
+  }
+```
+* CachingProviderRegistry内部数据结构
+```
+WeakHashMap<ClassLoader, LinkedHashMap<String, CachingProvider>> cachingProviders;
+```
+* CachingProviderRegistry的ClassLoader，默认是
+```
+Thread.currentThread().getContextClassLoader()
+```
+可通过```void setDefaultClassLoader(ClassLoader classLoader)```改
+
+* CachingProviderRegistry六个获取CacheProvider的方法
+```
+CachingProvider getCachingProvider()	//不传ClassLoader的方法使用默认的ClassLoader
+
+CachingProvider getCachingProvider(ClassLoader classLoader)	//超过一种实现抛异常
+
+Iterable<CachingProvider> getCachingProviders()
+
+Iterable<CachingProvider> getCachingProviders(ClassLoader classLoader)	//获取所有实现
+
+CachingProvider getCachingProvider(String fullyQualifiedClassName)
+
+CachingProvider getCachingProvider(String fullyQualifiedClassName, ClassLoader classLoader)	//获取特定的某个实现
+```
+* 加载CacheProvider实现的方式
+	+ 从```System.getProperty("javax.cache.spi.CachingProvider")```获取实现类全限定名，通过反射实例化
+	+ 通过SPI实例化
