@@ -1,0 +1,71 @@
+Kafka Introduction
+===
+关键能力
+---
+* 发布、订阅，类似MQ
+* 可容错的存储流式数据
+* 处理流式数据
+
+概念
+---
+* 集群式
+* 按topic分类存储
+* 每条记录包括key,value,timestamp
+
+四个核心api，基于TCP的通信协议
+---
+* Producer API
+* Consumer API
+* Streams API
+* Connector API：连接应用或db
+
+topic
+---
+![](image/kafka-topic.png)
+
+* 多个producer对topic进行写入，多个consumer对topic进行消费
+* 一个topic分成多个partition，partition可以分布在不同的物理机上
+* 每个partition在物理上都是顺序写入磁盘的
+* 消费后数据不会丢弃，可以重复消费
+* 定时清理数据只是为了减少磁盘存储，数据量大对写入、读取速度没有影响
+* partition可以配置为存储在多个服务器上，实现容错；一个leader，多个follower
+* MirrorMaker提供复制的能力，可用于备份和迁移（数据更接近用户）
+
+producer
+---
+* 通过负载均衡策略选择一个topic的某个partition进行写入
+
+consumer
+---
+![](image/kafka-consumer.png)
+
+* consumer可分group，每个topic上的一条消息会分发到每个group的一个实例上
+* 如果每个consumer是一个group，像广播，相当于publish-subscribe
+* 如果所有consumer是一个group，是负载均衡的，相当于quene
+* 一个topic的一个partition上的消息只会分发到group的一个consumer上
+* 一个consumer可以消费多个topic的多个partition
+* consumer数量不能大于partition的数量
+* kafka可以保证每个partition上的消息是顺序读取的
+
+kafka对消息顺序的保证
+---
+* 每个producer写入消息到一个topic的一个partition是有序的
+* 每个consumer读取到的消息是有序的
+* partition被复制到n个server上，可容忍n-1个server失败，保证不会丢消息
+
+作为MQ
+---
+* 支持queue和publish-subscribe
+* 保证消息有序
+
+作为存储
+---
+* 通过复制的特性实现容错，在复制完成前写入不被认为是完整的
+* 低延迟写入，可重复读
+
+流处理
+---
+
+碎片整理
+---
+* 可以同时处理过去的数据和未到达的数据

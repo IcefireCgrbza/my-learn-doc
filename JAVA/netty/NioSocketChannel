@@ -1,0 +1,63 @@
+NioSocketChannel
+===
+初始化
+---
+![](NioSocketChannel1.png)
+1. NioSocketChannel的构造函数
+```
+	private static final SelectorProvider DEFAULT_SELECTOR_PROVIDER = SelectorProvider.provider();
+
+	public NioSocketChannel() {
+        this(DEFAULT_SELECTOR_PROVIDER);
+    }
+    
+	public NioSocketChannel(SelectorProvider provider) {
+        this(newSocket(provider));
+    }
+    
+    public NioSocketChannel(SocketChannel socket) {
+        this(null, socket);
+    }
+    
+    public NioSocketChannel(Channel parent, SocketChannel socket) {
+        super(parent, socket);
+        config = new NioSocketChannelConfig(this, socket.socket());
+    }
+    
+    private static SocketChannel newSocket(SelectorProvider provider) {
+        try {
+            ...
+            return provider.openSocketChannel();
+        } catch (IOException e) {
+            throw new ChannelException("Failed to open a socket.", e);
+        }
+    }
+```
+2. AbstractNioByteChannel的构造函数
+```
+	protected AbstractNioByteChannel(Channel parent, SelectableChannel ch) {
+        super(parent, ch, SelectionKey.OP_READ);
+    }
+```
+3. AbstractNioChannel的构造函数
+```
+	protected AbstractNioChannel(Channel parent, SelectableChannel ch, int readInterestOp) {
+        super(parent);
+        this.ch = ch;
+        this.readInterestOp = readInterestOp;
+        try {
+            ch.configureBlocking(false);
+        } catch (IOException e) {
+            ...
+        }
+    }
+```
+4. AbstractChannel的构造函数
+```
+protected AbstractChannel(Channel parent) {
+        this.parent = parent;
+        id = newId();
+        unsafe = newUnsafe();
+        pipeline = newChannelPipeline();
+    }
+```

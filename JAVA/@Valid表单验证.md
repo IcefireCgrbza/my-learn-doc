@@ -116,4 +116,4 @@ public class CdnConfigCreateRequest extends BaseRequest {
 
 通过AOP给@Valid拦截的请求打log
 ---
-（暂未研究）
+* 通过BindingResult获取@Valid的异常，再使用@Advice构造切面处理，通过注解的message传递错误信息

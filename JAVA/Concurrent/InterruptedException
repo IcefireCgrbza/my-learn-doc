@@ -1,0 +1,26 @@
+InterruptedException
+===
+* 中断是为了避免死锁，像阻塞或非阻塞的线程发起中断，提示它可能死锁，需要终止；中断的线程意识到中断信号时如何处理就取决于程序本身
+
+* 每一个线程都拥有一个 interrupted status，初始值是 false。当一个线程被另一个线程调用 Thread.interrupt() 而中止时：
+
+	1. 如果被中止线程正阻塞在阻塞方法上，那么它将unblock并抛出InterruptedException 异常
+	2. 否则 interrupt()  方法只是 interrupted status 为 true，可以通过 Thread.isInterrupted() 来检查该线程是否已被 interrupted
+
+```
+public void run() {
+    try {
+        ...
+        /*
+         * 非阻塞时检查阻塞状态
+         */
+        while (!Thread.currentThread().isInterrupted() && more work to do) {
+            do more work 
+        }
+    } catch (InterruptedException e) {
+        //线程在阻塞时被中断了
+    } finally {
+        //线程结束做一些清理工作
+    }
+}
+```

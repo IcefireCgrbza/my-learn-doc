@@ -1,0 +1,737 @@
+EventLoopGroup
+===
+实例
+---
+```
+public class TimeClient {
+
+    public static void main(String[] args) throws InterruptedException {
+        EventLoopGroup worderGroup = new NioEventLoopGroup();
+
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(worderGroup)
+                    .channel(NioSocketChannel.class)
+                    .option(ChannelOption.SO_KEEPALIVE, true)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            ch.pipeline().addLast(new TimeClientHandler());
+                        }
+                    });
+            ChannelFuture f = b.connect("127.0.0.1", 8083).sync();
+            f.channel().closeFuture().sync();
+        } finally {
+            worderGroup.shutdownGracefully();
+        }
+    }
+}
+```
+
+NioEventLoopGroup
+---
+![](pic/NioEventLoopGroup1.png)
+
+NioEventLoopGroup的初始化
+---
+1. NioEventLoopGroup构造方法
+```
+public NioEventLoopGroup(int nThreads, Executor executor, final SelectorProvider selectorProvider,
+                             final SelectStrategyFactory selectStrategyFactory) {
+        super(nThreads, executor, selectorProvider, selectStrategyFactory, RejectedExecutionHandlers.reject());
+    }
+```
+2. 调用MultithreadEventLoopGroup的构造方法
+```
+protected MultithreadEventLoopGroup(int nThreads, Executor executor, Object... args) {
+        super(nThreads == 0 ? DEFAULT_EVENT_LOOP_THREADS : nThreads, executor, args);
+    }
+```
+```
+static {
+        DEFAULT_EVENT_LOOP_THREADS = Math.max(1, SystemPropertyUtil.getInt(
+                "io.netty.eventLoopThreads", NettyRuntime.availableProcessors() * 2));
+...
+    }
+```
+3. 调用MultithreadEventExecutorGroup的构造方法
+	+ 简单理解一下，children是一个线程池的数组，每个元素都是一个线程池，chooser是选择用哪个线程池的策略
+```
+protected MultithreadEventExecutorGroup(int nThreads, Executor executor,
+                                            EventExecutorChooserFactory chooserFactory, Object... args) {
+        ...
+
+	if (executor == null) {
+            executor = new ThreadPerTaskExecutor(newDefaultThreadFactory());
+        }
+
+        children = new EventExecutor[nThreads];
+
+        for (int i = 0; i < nThreads; i ++) {
+            ...
+            try {
+                children[i] = newChild(executor, args);
+                ...
+            } catch (Exception e) {
+                ...
+            } finally {
+                ...
+            }
+        }
+
+        chooser = chooserFactory.newChooser(children);
+
+        ...
+    }
+```
+```
+protected EventLoop newChild(Executor executor, Object... args) throws Exception {
+        return new NioEventLoop(this, executor, (SelectorProvider) args[0],
+            ((SelectStrategyFactory) args[1]).newSelectStrategy(), (RejectedExecutionHandler) args[2]);
+    }
+```
+```
+public EventExecutorChooser newChooser(EventExecutor[] executors) {
+        if (isPowerOfTwo(executors.length)) {
+            return new PowerOfTwoEventExecutorChooser(executors);
+        } else {
+            return new GenericEventExecutorChooser(executors);
+        }
+    }
+```
+
+NioEventLoop
+---
+![](pic/NioEventLoop1.png)
+
+NioEventLoop的初始化
+---
+1. NioEventLoop的构造函数
+```
+public final class NioEventLoop extends SingleThreadEventLoop {
+
+    NioEventLoop(NioEventLoopGroup parent, Executor executor, SelectorProvider selectorProvider,
+                 SelectStrategy strategy, RejectedExecutionHandler rejectedExecutionHandler) {
+        super(parent, executor, false, DEFAULT_MAX_PENDING_TASKS, rejectedExecutionHandler);
+        
+        ...
+        
+        provider = selectorProvider;
+        final SelectorTuple selectorTuple = openSelector();
+        selector = selectorTuple.selector;
+        unwrappedSelector = selectorTuple.unwrappedSelector;
+        selectStrategy = strategy;
+    }
+
+    private SelectorTuple openSelector() {
+        
+        ...
+        
+        unwrappedSelector = provider.openSelector();
+
+	...
+
+        final SelectedSelectionKeySet selectedKeySet = new SelectedSelectionKeySet();
+        
+        //此处有一段通过反射将selectedKeySet和unwrappedSelector绑定的代码，省略
+        
+        ...
+        
+        return new SelectorTuple(unwrappedSelector,
+                                 new SelectedSelectionKeySetSelector(unwrappedSelector, selectedKeySet));
+    }
+    
+    private static final class SelectorTuple {
+        final Selector unwrappedSelector;
+        final Selector selector;
+
+        SelectorTuple(Selector unwrappedSelector) {
+            this.unwrappedSelector = unwrappedSelector;
+            this.selector = unwrappedSelector;
+        }
+
+        SelectorTuple(Selector unwrappedSelector, Selector selector) {
+            this.unwrappedSelector = unwrappedSelector;
+            this.selector = selector;
+        }
+    }
+    
+    @Override
+    protected Queue<Runnable> newTaskQueue(int maxPendingTasks) {
+        // This event loop never calls takeTask()
+        return maxPendingTasks == Integer.MAX_VALUE ? PlatformDependent.<Runnable>newMpscQueue()
+                                                    : PlatformDependent.<Runnable>newMpscQueue(maxPendingTasks);
+    }
+}
+
+final class SelectedSelectionKeySetSelector extends Selector {
+    private final SelectedSelectionKeySet selectionKeys;
+    private final Selector delegate;
+
+    SelectedSelectionKeySetSelector(Selector delegate, SelectedSelectionKeySet selectionKeys) {
+        this.delegate = delegate;
+        this.selectionKeys = selectionKeys;
+    }
+
+    @Override
+    public boolean isOpen() {
+        return delegate.isOpen();
+    }
+
+    @Override
+    public SelectorProvider provider() {
+        return delegate.provider();
+    }
+
+    @Override
+    public Set<SelectionKey> keys() {
+        return delegate.keys();
+    }
+
+    @Override
+    public Set<SelectionKey> selectedKeys() {
+        return delegate.selectedKeys();
+    }
+
+    @Override
+    public int selectNow() throws IOException {
+        selectionKeys.reset();
+        return delegate.selectNow();
+    }
+
+    @Override
+    public int select(long timeout) throws IOException {
+        selectionKeys.reset();
+        return delegate.select(timeout);
+    }
+
+    @Override
+    public int select() throws IOException {
+        selectionKeys.reset();
+        return delegate.select();
+    }
+
+    @Override
+    public Selector wakeup() {
+        return delegate.wakeup();
+    }
+
+    @Override
+    public void close() throws IOException {
+        delegate.close();
+    }
+}
+```
+2. SingleThreadEventLoop的初始化
+```
+protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor,
+                                    boolean addTaskWakesUp, int maxPendingTasks,
+                                    RejectedExecutionHandler rejectedExecutionHandler) {
+        super(parent, executor, addTaskWakesUp, maxPendingTasks, rejectedExecutionHandler);
+        tailTasks = newTaskQueue(maxPendingTasks);
+    }
+```
+3. SingleThreadEventExecutor的初始化
+```
+protected SingleThreadEventExecutor(EventExecutorGroup parent, Executor executor,
+                                        boolean addTaskWakesUp, int maxPendingTasks,
+                                        RejectedExecutionHandler rejectedHandler) {
+        super(parent);
+        this.addTaskWakesUp = addTaskWakesUp;
+        this.maxPendingTasks = Math.max(16, maxPendingTasks);
+        this.executor = ObjectUtil.checkNotNull(executor, "executor");
+        taskQueue = newTaskQueue(this.maxPendingTasks);
+        rejectedExecutionHandler = ObjectUtil.checkNotNull(rejectedHandler, "rejectedHandler");
+    }
+```
+4. AbstractScheduledEventExecutor的初始化
+```
+protected AbstractScheduledEventExecutor(EventExecutorGroup parent) {
+        super(parent);
+    }
+```
+5. AbstractEventExecutor的初始化
+```
+protected AbstractEventExecutor(EventExecutorGroup parent) {
+        this.parent = parent;
+    }
+```
+
+Channel绑定到EventLoopGroup
+---
+1. AbstractBootstrap中调用EventLoopGroup的register方法
+```
+final ChannelFuture initAndRegister() {
+        ...
+
+        ChannelFuture regFuture = config().group().register(channel);
+        
+        ...
+    }
+```
+2. MultithreadEventLoopGroup的register方法
+```
+public abstract class MultithreadEventLoopGroup extends MultithreadEventExecutorGroup implements EventLoopGroup {
+
+	@Override
+    public ChannelFuture register(Channel channel) {
+        return next().register(channel);
+    }
+    
+    @Override
+    public EventLoop next() {
+        return (EventLoop) super.next();
+    }
+}
+
+public abstract class MultithreadEventExecutorGroup extends AbstractEventExecutorGroup {
+
+	@Override
+    public EventExecutor next() {
+        //策略模式选择一个EventLoop
+        return chooser.next();
+    }
+}
+
+@UnstableApi
+public final class DefaultEventExecutorChooserFactory implements EventExecutorChooserFactory {
+
+    public static final DefaultEventExecutorChooserFactory INSTANCE = new DefaultEventExecutorChooserFactory();
+
+    private DefaultEventExecutorChooserFactory() { }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public EventExecutorChooser newChooser(EventExecutor[] executors) {
+        if (isPowerOfTwo(executors.length)) {
+            return new PowerOfTwoEventExecutorChooser(executors);
+        } else {
+            return new GenericEventExecutorChooser(executors);
+        }
+    }
+
+    private static boolean isPowerOfTwo(int val) {
+        return (val & -val) == val;
+    }
+
+    private static final class PowerOfTwoEventExecutorChooser implements EventExecutorChooser {
+        private final AtomicInteger idx = new AtomicInteger();
+        private final EventExecutor[] executors;
+
+        PowerOfTwoEventExecutorChooser(EventExecutor[] executors) {
+            this.executors = executors;
+        }
+
+        @Override
+        public EventExecutor next() {
+            return executors[idx.getAndIncrement() & executors.length - 1];
+        }
+    }
+
+    private static final class GenericEventExecutorChooser implements EventExecutorChooser {
+        private final AtomicInteger idx = new AtomicInteger();
+        private final EventExecutor[] executors;
+
+        GenericEventExecutorChooser(EventExecutor[] executors) {
+            this.executors = executors;
+        }
+
+        @Override
+        public EventExecutor next() {
+            return executors[Math.abs(idx.getAndIncrement() % executors.length)];
+        }
+    }
+}
+
+```
+3. SingleThreadEventLoop的register方法
+```
+public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor implements EventLoop {
+
+	@Override
+    public ChannelFuture register(Channel channel) {
+        return register(new DefaultChannelPromise(channel, this));
+    }
+    
+    @Override
+    public ChannelFuture register(final ChannelPromise promise) {
+        ObjectUtil.checkNotNull(promise, "promise");
+        promise.channel().unsafe().register(this, promise);
+        return promise;
+    }
+```
+4. AbstractChannel的AbstractUnsafe的register方法
+```
+public abstract class AbstractChannel extends DefaultAttributeMap implements Channel {
+
+	...
+
+	protected abstract class AbstractUnsafe implements Unsafe {
+	
+		@Override
+		public final void register(EventLoop eventLoop, final ChannelPromise promise) {
+		    ...
+
+		    if (eventLoop.inEventLoop()) {
+		        register0(promise);
+		    } else {
+		        try {
+		            //交给eventLoop一个调度任务，该任务注册channel到selector
+		            eventLoop.execute(new Runnable() {
+		                @Override
+		                public void run() {
+		                    register0(promise);
+		                }
+		            });
+		        } catch (Throwable t) {
+		            ...
+		        }
+		    }
+		}
+	}
+}
+```
+5. SingleThreadEventExecutor的execute提交任务
+```
+public abstract class SingleThreadEventExecutor extends AbstractScheduledEventExecutor implements OrderedEventExecutor {
+
+	public void execute(Runnable task) {
+		...
+
+		boolean inEventLoop = inEventLoop();
+		addTask(task);
+		if (!inEventLoop) {
+		    startThread();
+		    
+		    ...
+		}
+
+		...
+	}
+	
+	protected void addTask(Runnable task) {
+    		...
+    		
+        	offerTask(task);
+        	
+        	...
+    	}
+    
+    	final boolean offerTask(Runnable task) {
+        	if (isShutdown()) {
+            	reject();
+        	}
+        	return taskQueue.offer(task);
+    	}
+    	
+    	private void startThread() {
+		...
+		
+		doStartThread();
+		
+		...
+    	}
+    	
+    	private void doStartThread() {
+		assert thread == null;
+		//线程池调度该任务
+		executor.execute(new Runnable() {
+		    @Override
+		    public void run() {
+		    	//通过线程池start一个新线程，并交给eventLoop调度
+		        thread = Thread.currentThread();
+		        
+		        ...
+		        
+		        try {
+		            //执行NioEventLoop的select
+		            SingleThreadEventExecutor.this.run();
+		            ...
+		        } catch (Throwable t) {
+		            ...
+		        } finally {
+		            ...
+		        }
+		    }
+		});
+	    }
+}
+
+public final class ThreadPerTaskExecutor implements Executor {
+    private final ThreadFactory threadFactory;
+
+    public ThreadPerTaskExecutor(ThreadFactory threadFactory) {
+        if (threadFactory == null) {
+            throw new NullPointerException("threadFactory");
+        }
+        this.threadFactory = threadFactory;
+    }
+
+    @Override
+    public void execute(Runnable command) {
+        threadFactory.newThread(command).start();
+    }
+}
+```
+6. NioEventLoop的run，循环中处理io事件和任务调度
+```
+public final class NioEventLoop extends SingleThreadEventLoop {
+
+	...
+	
+	private final IntSupplier selectNowSupplier = new IntSupplier() {
+		@Override
+		public int get() throws Exception {
+		    return selectNow();
+		}
+	};
+	
+	protected void run() {
+		for (;;) {
+		    try {
+		        try {
+		            switch (selectStrategy.calculateStrategy(selectNowSupplier, hasTasks())) {
+		            case SelectStrategy.CONTINUE:
+		                continue;
+
+		            case SelectStrategy.BUSY_WAIT:
+		                // fall-through to SELECT since the busy-wait is not supported with NIO
+
+		            case SelectStrategy.SELECT:
+		                //hasTask()为false
+		                //可理解为hasTask就selectNow，否则阻塞select
+		                select(wakenUp.getAndSet(false));
+
+		                ...
+
+		                if (wakenUp.get()) {
+		                    selector.wakeup();
+		                }
+		                // fall through
+		            default:
+		            }
+		        } catch (IOException e) {
+		            ...
+		        }
+
+		        ...
+		        
+		        //EventLoop的线程处理io任务和调度任务
+		        //这是io任务和调度任务的时间占比
+		        final int ioRatio = this.ioRatio;
+		        if (ioRatio == 100) {
+		            try {
+		            	//io任务
+		                processSelectedKeys();
+		            } finally {
+		                //调度任务
+		                runAllTasks();
+		            }
+		        } else {
+		            final long ioStartTime = System.nanoTime();
+		            try {
+		            	//io任务
+		                processSelectedKeys();
+		            } finally {
+		                //调度任务
+		                final long ioTime = System.nanoTime() - ioStartTime;
+		                runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
+		            }
+		        }
+		    } catch (Throwable t) {
+		        ...
+		    }
+		    
+		    ...
+		}
+	}
+	    
+	int selectNow() throws IOException {
+		try {
+		    return selector.selectNow();
+		} finally {
+		    ...
+		}
+	}
+	
+	private void processSelectedKeys() {
+		if (selectedKeys != null) {
+		    processSelectedKeysOptimized();
+		} else {
+		    processSelectedKeysPlain(selector.selectedKeys());
+		}
+	}
+	
+	private void processSelectedKeysOptimized() {
+		for (int i = 0; i < selectedKeys.size; ++i) {
+		    final SelectionKey k = selectedKeys.keys[i];
+		    
+		    selectedKeys.keys[i] = null;
+
+		    final Object a = k.attachment();
+
+		    if (a instanceof AbstractNioChannel) {
+		        processSelectedKey(k, (AbstractNioChannel) a);
+		    } else {
+		        ...
+		    }
+
+		    ...
+		}
+	}
+	
+	private void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
+        final AbstractNioChannel.NioUnsafe unsafe = ch.unsafe();
+        ...
+
+        try {
+            int readyOps = k.readyOps();
+            ...
+            if ((readyOps & SelectionKey.OP_CONNECT) != 0) {
+                //Connect事件
+                int ops = k.interestOps();
+                ops &= ~SelectionKey.OP_CONNECT;
+                k.interestOps(ops);
+
+                unsafe.finishConnect();
+            }
+
+            if ((readyOps & SelectionKey.OP_WRITE) != 0) {
+                //Write事件
+                ch.unsafe().forceFlush();
+            }
+
+            if ((readyOps & (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0) {
+            	//Read事件
+                unsafe.read();
+            }
+        } catch (CancelledKeyException ignored) {
+            ...
+        }
+    }
+}
+
+final class DefaultSelectStrategy implements SelectStrategy {
+    static final SelectStrategy INSTANCE = new DefaultSelectStrategy();
+
+    private DefaultSelectStrategy() { }
+
+    @Override
+    public int calculateStrategy(IntSupplier selectSupplier, boolean hasTasks) throws Exception {
+        return hasTasks ? selectSupplier.get() : SelectStrategy.SELECT;
+    }
+}
+
+public abstract class SingleThreadEventExecutor extends AbstractScheduledEventExecutor implements OrderedEventExecutor {
+
+	protected boolean runAllTasks() {
+		assert inEventLoop();
+		boolean fetchedAll;
+		boolean ranAtLeastOne = false;
+
+		do {
+		    //将定时任务放到任务队列
+		    fetchedAll = fetchFromScheduledTaskQueue();
+		    //任务调度
+		    if (runAllTasksFrom(taskQueue)) {
+		        ranAtLeastOne = true;
+		    }
+		} while (!fetchedAll); // keep on processing until we fetched all scheduled tasks.
+
+		if (ranAtLeastOne) {
+		    lastExecutionTime = ScheduledFutureTask.nanoTime();
+		}
+		//调度tailTask
+		afterRunningAllTasks();
+		return ranAtLeastOne;
+	}
+	
+	private boolean fetchFromScheduledTaskQueue() {
+		long nanoTime = AbstractScheduledEventExecutor.nanoTime();
+		Runnable scheduledTask  = pollScheduledTask(nanoTime);
+		while (scheduledTask != null) {
+		    if (!taskQueue.offer(scheduledTask)) {
+		        scheduledTaskQueue().add((ScheduledFutureTask<?>) scheduledTask);
+		        return false;
+		    }
+		    scheduledTask  = pollScheduledTask(nanoTime);
+		}
+		return true;
+	}
+	
+	protected final boolean runAllTasksFrom(Queue<Runnable> taskQueue) {
+		Runnable task = pollTaskFrom(taskQueue);
+		if (task == null) {
+		    return false;
+		}
+		for (;;) {
+		    safeExecute(task);
+		    task = pollTaskFrom(taskQueue);
+		    if (task == null) {
+		        return true;
+		    }
+		}
+    	}
+    	
+    	protected boolean runAllTasks(long timeoutNanos) {
+		fetchFromScheduledTaskQueue();
+		Runnable task = pollTask();
+		if (task == null) {
+		    afterRunningAllTasks();
+		    return false;
+		}
+
+		final long deadline = ScheduledFutureTask.nanoTime() + timeoutNanos;
+		long runTasks = 0;
+		long lastExecutionTime;
+		for (;;) {
+		    safeExecute(task);
+
+		    runTasks ++;
+
+		    // Check timeout every 64 tasks because nanoTime() is relatively expensive.
+		    // XXX: Hard-coded value - will make it configurable if it is really a problem.
+		    if ((runTasks & 0x3F) == 0) {
+		        lastExecutionTime = ScheduledFutureTask.nanoTime();
+		        if (lastExecutionTime >= deadline) {
+		            break;
+		        }
+		    }
+
+		    task = pollTask();
+		    if (task == null) {
+		        lastExecutionTime = ScheduledFutureTask.nanoTime();
+		        break;
+		    }
+		}
+
+		afterRunningAllTasks();
+		this.lastExecutionTime = lastExecutionTime;
+		return true;
+	    }
+}
+
+public abstract class AbstractEventExecutor extends AbstractExecutorService implements EventExecutor {
+
+	protected static void safeExecute(Runnable task) {
+		try {
+		    task.run();
+		} catch (Throwable t) {
+		    logger.warn("A task raised an exception. Task: {}", task, t);
+		}
+	}
+}
+
+public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor implements EventLoop {
+
+	@Override
+	protected void afterRunningAllTasks() {
+		runAllTasksFrom(tailTasks);
+	}
+}
+```
+
+总结
+---
+1. EventLoopGroup是一个线程池，负责调度EventLoop
+2. EventLoop是线程，可绑定Channel，负责io事件和任务调度

@@ -1,0 +1,17 @@
+ChannelFuture
+===
+* 继承io.netty.util.concurrent.Future
+
+* netty中io操作都是异步的，返回future对象
+
+* isDone()=false是未完成，true是完成，然后才有isSuccess(), isCancelled(), cause()
+![](ChannelFuture1.png)
+
+* 方法总结：
+	+ addListener()：增加一个io操作完成后的回调
+	+ await()：阻塞等待直到io操作完成，抛出InterruptionException
+	+ awaitUninterruptibly()：阻塞等待直到io操作完成，吞掉InterruptionException
+	+ channel()：返回发生io的Channel对象
+	+ isVoid()：true不允许调用addListener、await、sync
+	+ sync()：阻塞等待直到io操作完成，失败抛异常，抛出InterruptionException
+	+ syncUninterruptibly()：阻塞等待直到io操作完成，失败抛异常，吞掉InterruptionException

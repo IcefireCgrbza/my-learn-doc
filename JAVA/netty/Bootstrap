@@ -1,0 +1,258 @@
+Bootstrap
+===
+demo
+---
+```
+public class TimeClient {
+
+    public static void main(String[] args) throws InterruptedException {
+        EventLoopGroup worderGroup = new NioEventLoopGroup();
+
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(worderGroup)
+                    .channel(NioSocketChannel.class)
+                    .option(ChannelOption.SO_KEEPALIVE, true)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            ch.pipeline().addLast(new TimeClientHandler());
+                        }
+                    });
+            ChannelFuture f = b.connect("127.0.0.1", 8083).sync();
+            f.channel().closeFuture().sync();
+        } finally {
+            worderGroup.shutdownGracefully();
+        }
+    }
+}
+```
+demo源码分析
+---
+1. 构造函数
+```
+public Bootstrap() { }
+```
+2. 设置EventLoopGroup：类似Builder的行为
+```
+    public B group(EventLoopGroup group) {
+	...
+        this.group = group;
+        return self();
+    }
+    
+    private B self() {
+        return (B) this;
+    }
+```
+3. 设置channel类型：类似Builder的行为，builder里设置了channel的工厂，这个工厂用反射实例化对象
+```
+    public B channel(Class<? extends C> channelClass) {
+        ...
+        return channelFactory(new ReflectiveChannelFactory<C>(channelClass));
+    }
+    
+    public B channelFactory(io.netty.channel.ChannelFactory<? extends C> channelFactory) {
+        return channelFactory((ChannelFactory<C>) channelFactory);
+    }
+    
+    public B channelFactory(ChannelFactory<? extends C> channelFactory) {
+        ...
+
+        this.channelFactory = channelFactory;
+        return self();
+    }
+```
+```
+    public class ReflectiveChannelFactory<T extends Channel> implements ChannelFactory<T> {
+
+    private final Constructor<? extends T> constructor;
+
+    public ReflectiveChannelFactory(Class<? extends T> clazz) {
+        ...
+        try {
+            this.constructor = clazz.getConstructor();
+        } catch (NoSuchMethodException e) {
+            ...
+        }
+    }
+
+    @Override
+    public T newChannel() {
+        try {
+            return constructor.newInstance();
+        } catch (Throwable t) {
+            ...
+        }
+    }
+
+    ...
+}
+```
+4. 设置handler：类似Builder的行为
+```
+    public B handler(ChannelHandler handler) {
+        ...
+        this.handler = handler;
+        return self();
+    }
+```
+5. 与远端建立连接
+```
+Bootstrap.java
+
+    public ChannelFuture connect(String inetHost, int inetPort) {
+        return connect(InetSocketAddress.createUnresolved(inetHost, inetPort));
+    }
+    
+    public ChannelFuture connect(SocketAddress remoteAddress) {
+        ...
+        
+        return doResolveAndConnect(remoteAddress, config.localAddress());
+    }
+    
+    private ChannelFuture doResolveAndConnect(final SocketAddress remoteAddress, final SocketAddress localAddress) {
+   	//新建channel，handler、options、attr绑定到channel，channel绑定到eventLoopGroup
+        final ChannelFuture regFuture = initAndRegister();	
+        final Channel channel = regFuture.channel();
+
+        if (regFuture.isDone()) {
+            //完成
+            if (!regFuture.isSuccess()) {
+            	//失败
+                return regFuture;
+            }
+            //成功
+            return doResolveAndConnect0(channel, remoteAddress, localAddress, channel.newPromise());
+        } else {
+            // 未完成
+            final PendingRegistrationPromise promise = new PendingRegistrationPromise(channel);
+            regFuture.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture future) throws Exception {
+                    Throwable cause = future.cause();
+                    if (cause != null) {
+                        //失败
+                        promise.setFailure(cause);
+                    } else {
+                        //成功
+                        promise.registered();
+                        doResolveAndConnect0(channel, remoteAddress, localAddress, promise);
+                    }
+                }
+            });
+            return promise;
+        }
+    }
+    
+    void init(Channel channel) throws Exception {
+    	//设置handler
+        ChannelPipeline p = channel.pipeline();
+        p.addLast(config.handler());
+
+	//设置option
+        final Map<ChannelOption<?>, Object> options = options0();
+        synchronized (options) {
+            setChannelOptions(channel, options, logger);
+        }
+
+	//设置attr
+        final Map<AttributeKey<?>, Object> attrs = attrs0();
+        synchronized (attrs) {
+            for (Entry<AttributeKey<?>, Object> e: attrs.entrySet()) {
+                channel.attr((AttributeKey<Object>) e.getKey()).set(e.getValue());
+            }
+        }
+    }
+    
+    private ChannelFuture doResolveAndConnect0(final Channel channel, SocketAddress remoteAddress,
+                                               final SocketAddress localAddress, final ChannelPromise promise) {
+        try {
+            final EventLoop eventLoop = channel.eventLoop();
+            final AddressResolver<SocketAddress> resolver = this.resolver.getResolver(eventLoop);
+
+            if (!resolver.isSupported(remoteAddress) || resolver.isResolved(remoteAddress)) {
+                // 不支持的address或者是已经解析
+                doConnect(remoteAddress, localAddress, promise);
+                return promise;
+            }
+
+	    //解析远端address
+            final Future<SocketAddress> resolveFuture = resolver.resolve(remoteAddress);
+
+            if (resolveFuture.isDone()) {
+            	//完成
+                final Throwable resolveFailureCause = resolveFuture.cause();
+
+                if (resolveFailureCause != null) {
+                    //失败
+                    channel.close();
+                    promise.setFailure(resolveFailureCause);
+                } else {
+                    //成功
+                    doConnect(resolveFuture.getNow(), localAddress, promise);
+                }
+                return promise;
+            }
+
+            resolveFuture.addListener(new FutureListener<SocketAddress>() {
+                @Override
+                public void operationComplete(Future<SocketAddress> future) throws Exception {
+                    if (future.cause() != null) {
+                        //失败
+                        channel.close();
+                        promise.setFailure(future.cause());
+                    } else {
+                        //成功
+                        doConnect(future.getNow(), localAddress, promise);
+                    }
+                }
+            });
+        } catch (Throwable cause) {
+            promise.tryFailure(cause);
+        }
+        return promise;
+    }
+    
+    private static void doConnect(
+            final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise connectPromise) {
+
+        // 建立连接
+        final Channel channel = connectPromise.channel();
+        channel.eventLoop().execute(new Runnable() {
+            @Override
+            public void run() {
+                if (localAddress == null) {
+                    channel.connect(remoteAddress, connectPromise);
+                } else {
+                    channel.connect(remoteAddress, localAddress, connectPromise);
+                }
+                connectPromise.addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+            }
+        });
+    }
+```
+```
+AbstractBootstrap.java 
+
+    final ChannelFuture initAndRegister() {
+        Channel channel = null;
+        try {
+            channel = channelFactory.newChannel();	//新建channel
+            init(channel);	//设置channel的option、attr和handler
+        } catch (Throwable t) {
+            ...
+        }
+
+        ChannelFuture regFuture = config().group().register(channel);	//channel注册到EventLoopGroup上
+        ...
+
+        return regFuture;
+    }
+```
+总结
+---
+1. Bootstrap是netty提供给客户端与服务端建立连接的引导类
+2. Bootstrap继承AbstractBootstrap，BootstrapConfig内封装了Bootstrap的一些配置，AbstractBootstrapConfig同理
+3. Bootstrap使用建造者模式暴露接口给用户设置EventLoopGroup，Channel(ChannelFactory)，options，attr等配置
+4. 在建立连接时，Bootstrap通过ChannelFactory新建Channel，设置Channel的option、attr、handler，把channel绑定到EventLoopGroup，解析remoteAddr，建立连接
